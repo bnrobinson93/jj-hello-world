@@ -1,1 +1,1 @@
-coreutils test
+test content
