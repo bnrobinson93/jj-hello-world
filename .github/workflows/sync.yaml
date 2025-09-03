@@ -21,6 +21,11 @@ jobs:
           fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Configure Git (needed for branch operations)
+        run: |
+          git config user.name "Brad R"
+          git config user.email "31802085+bnrobinson93@users.noreply.github.com"
+
       - name: Get commit info
         id: commit-info
         run: |
@@ -64,43 +69,19 @@ jobs:
             }
 
       - name: Create or update branch
-        uses: actions/github-script@v7
-        with:
-          script: |
-            // Check if branch exists
-            try {
-              await github.rest.repos.getBranch({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                branch: 'feat/latest-changes-from-main'
-              });
+        run: |
+          # Check if branch exists remotely
+          if git ls-remote --heads origin feat/latest-changes-from-main | grep -q feat/latest-changes-from-main; then
+            echo "Branch exists, checking it out and updating..."
+            git fetch origin feat/latest-changes-from-main
+            git checkout feat/latest-changes-from-main
+            git reset --hard origin/main
+          else
+            echo "Branch doesn't exist, creating from main..."
+            git checkout -b feat/latest-changes-from-main
+          fi
 
-              console.log('Branch exists, updating it...');
-
-              // Update the branch to point to current main
-              await github.rest.git.updateRef({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                ref: 'heads/feat/latest-changes-from-main',
-                sha: context.sha,
-                force: true
-              });
-
-            } catch (error) {
-              if (error.status === 404) {
-                console.log('Branch does not exist, creating it...');
-
-                // Create new branch from current main commit
-                await github.rest.git.createRef({
-                  owner: context.repo.owner,
-                  repo: context.repo.repo,
-                  ref: 'refs/heads/feat/latest-changes-from-main',
-                  sha: context.sha
-                });
-              } else {
-                throw error;
-              }
-            }
+          git push origin feat/latest-changes-from-main
 
       - name: Create new PR
         if: steps.check-pr.outputs.pr-exists == 'false'
@@ -118,7 +99,7 @@ jobs:
 
             ### Recent Commits:
 
-            **${new Date(commitDate).toLocaleString()}** - ${commitMessage}  
+            **${new Date(commitDate).toLocaleString()}** - ${commitMessage}
             _by ${commitAuthor}_ (\`${commitSha.substring(0, 7)}\`)
 
             ---
@@ -144,13 +125,17 @@ jobs:
 
             console.log(`Created PR #${pr.number}`);
 
-            // Add labels
-            await github.rest.issues.addLabels({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: pr.number,
-              labels: ['auto-sync', 'main-integration']
-            });
+            // Add labels if they exist
+            try {
+              await github.rest.issues.addLabels({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: pr.number,
+                labels: ['auto-sync', 'main-integration']
+              });
+            } catch (error) {
+              console.log('Note: Could not add labels (they may not exist in the repo)');
+            }
 
       - name: Update existing PR
         if: steps.check-pr.outputs.pr-exists == 'true'
@@ -164,7 +149,7 @@ jobs:
             const prNumber = ${{ steps.check-pr.outputs.pr-number }};
             const existingBody = `${{ steps.check-pr.outputs.pr-body }}`;
 
-            const newCommitEntry = `**${new Date(commitDate).toLocaleString()}** - ${commitMessage}  
+            const newCommitEntry = `**${new Date(commitDate).toLocaleString()}** - ${commitMessage}
             _by ${commitAuthor}_ (\`${commitSha.substring(0, 7)}\`)
             `;
 
