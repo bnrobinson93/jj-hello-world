@@ -1,0 +1,206 @@
+name: Create PR for Main Changes
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  create-sync-pr:
+    permissions:
+      contents: read
+      id-token: write
+
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Get commit info
+        id: commit-info
+        run: |
+          # Use the actual push context
+          COMMIT_MESSAGE="${{ github.event.head_commit.message }}"
+          COMMIT_AUTHOR="${{ github.event.head_commit.author.name }}"
+          COMMIT_SHA="${{ github.sha }}"
+          COMMIT_DATE="${{ github.event.head_commit.timestamp }}"
+
+          echo "message<<EOF" >> $GITHUB_OUTPUT
+          echo "$COMMIT_MESSAGE" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+          echo "author=$COMMIT_AUTHOR" >> $GITHUB_OUTPUT
+          echo "sha=$COMMIT_SHA" >> $GITHUB_OUTPUT
+          echo "date=$COMMIT_DATE" >> $GITHUB_OUTPUT
+
+      - name: Check for existing PR
+        id: check-pr
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { data: prs } = await github.rest.pulls.list({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              head: `${context.repo.owner}:feat/latest-changes-from-main`,
+              base: 'feat/PEP-2386-dsp-v1-integration',
+              state: 'open'
+            });
+
+            const existingPR = prs.length > 0 ? prs[0] : null;
+
+            if (existingPR) {
+              core.setOutput('pr-exists', 'true');
+              core.setOutput('pr-number', existingPR.number);
+              core.setOutput('pr-body', existingPR.body || '');
+              console.log(`Found existing PR #${existingPR.number}`);
+            } else {
+              core.setOutput('pr-exists', 'false');
+              console.log('No existing PR found');
+            }
+
+      - name: Create or update branch
+        uses: actions/github-script@v7
+        with:
+          script: |
+            // Check if branch exists
+            try {
+              await github.rest.repos.getBranch({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                branch: 'feat/latest-changes-from-main'
+              });
+
+              console.log('Branch exists, updating it...');
+
+              // Update the branch to point to current main
+              await github.rest.git.updateRef({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                ref: 'heads/feat/latest-changes-from-main',
+                sha: context.sha,
+                force: true
+              });
+
+            } catch (error) {
+              if (error.status === 404) {
+                console.log('Branch does not exist, creating it...');
+
+                // Create new branch from current main commit
+                await github.rest.git.createRef({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  ref: 'refs/heads/feat/latest-changes-from-main',
+                  sha: context.sha
+                });
+              } else {
+                throw error;
+              }
+            }
+
+      - name: Create new PR
+        if: steps.check-pr.outputs.pr-exists == 'false'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const commitMessage = `${{ steps.commit-info.outputs.message }}`;
+            const commitAuthor = `${{ steps.commit-info.outputs.author }}`;
+            const commitSha = context.sha;
+            const commitDate = `${{ steps.commit-info.outputs.date }}`;
+
+            const body = `## 🔄 Latest Changes from Main
+
+            This PR contains the latest changes from the \`main\` branch that need to be integrated into \`feat/PEP-2386-dsp-v1-integration\`.
+
+            ### Recent Commits:
+
+            **${new Date(commitDate).toLocaleString()}** - ${commitMessage}  
+            _by ${commitAuthor}_ (\`${commitSha.substring(0, 7)}\`)
+
+            ---
+
+            **Instructions:**
+            1. Review the changes in this PR
+            2. Test if needed
+            3. Approve and merge when ready
+            4. This PR will be automatically recreated for future main branch changes
+
+            _Auto-created by @${context.actor}_
+            `;
+
+            const { data: pr } = await github.rest.pulls.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: '🔄 Sync latest changes from main',
+              head: 'feat/latest-changes-from-main',
+              base: 'feat/PEP-2386-dsp-v1-integration',
+              body: body,
+              draft: false
+            });
+
+            console.log(`Created PR #${pr.number}`);
+
+            // Add labels
+            await github.rest.issues.addLabels({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: pr.number,
+              labels: ['auto-sync', 'main-integration']
+            });
+
+      - name: Update existing PR
+        if: steps.check-pr.outputs.pr-exists == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const commitMessage = `${{ steps.commit-info.outputs.message }}`;
+            const commitAuthor = `${{ steps.commit-info.outputs.author }}`;
+            const commitSha = context.sha;
+            const commitDate = `${{ steps.commit-info.outputs.date }}`;
+            const prNumber = ${{ steps.check-pr.outputs.pr-number }};
+            const existingBody = `${{ steps.check-pr.outputs.pr-body }}`;
+
+            const newCommitEntry = `**${new Date(commitDate).toLocaleString()}** - ${commitMessage}  
+            _by ${commitAuthor}_ (\`${commitSha.substring(0, 7)}\`)
+            `;
+
+            // Find where to insert the new commit (after "### Recent Commits:" line)
+            const lines = existingBody.split('\n');
+            const commitsIndex = lines.findIndex(line => line.includes('### Recent Commits:'));
+
+            if (commitsIndex !== -1) {
+              // Insert the new commit after the "### Recent Commits:" line and empty line
+              lines.splice(commitsIndex + 2, 0, newCommitEntry);
+              const updatedBody = lines.join('\n');
+
+              await github.rest.pulls.update({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                pull_number: prNumber,
+                body: updatedBody
+              });
+
+              console.log(`Updated PR #${prNumber} with new commit`);
+
+              // Add a comment about the new commit
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: prNumber,
+                body: `🔄 **New commit added from main by @${context.actor}:**\n\n${newCommitEntry}`
+              });
+            }
+
+      - name: Summary
+        uses: actions/github-script@v7
+        with:
+          script: |
+            if ('${{ steps.check-pr.outputs.pr-exists }}' === 'true') {
+              console.log(`✅ Updated existing PR #${{ steps.check-pr.outputs.pr-number }} with new changes from main`);
+            } else {
+              console.log(`✅ Created new PR to sync changes from main to feat/PEP-2386-dsp-v1-integration`);
+            }
