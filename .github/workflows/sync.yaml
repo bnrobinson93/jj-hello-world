@@ -1,4 +1,4 @@
-iname: Create PR for Main Changes
+name: Create PR for Main Changes
 
 on:
   push:
