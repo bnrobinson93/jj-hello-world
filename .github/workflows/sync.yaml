@@ -7,47 +7,54 @@ on:
 
 jobs:
   create-sync-pr:
+    runs-on: ubuntu-latest
+
+    # Job-level permissions (most restrictive possible)
     permissions:
       contents: read
-      id-token: write
-
-    runs-on: ubuntu-latest
+      pull-requests: write
+      issues: write
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          persist-credentials: false
           fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
+          persist-credentials: false # Don't persist credentials
 
-      - name: Configure Git (needed for branch operations)
+      - name: Configure Git with scoped token (job-scoped only)
         run: |
-          git config user.name "Brad R"
-          git config user.email "31802085+bnrobinson93@users.noreply.github.com"
+          git config --local user.name "Brad R"
+          git config --local user.email "31802085+bnrobinson93@users.noreply.github.com"
+          # Scoped to this job only, will not persist
+          git config --local url."https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/".insteadOf "https://github.com/"
 
-      - name: Get commit info
-        id: commit-info
-        run: |
-          # Use the actual push context
-          COMMIT_MESSAGE="${{ github.event.head_commit.message }}"
-          COMMIT_AUTHOR="${{ github.event.head_commit.author.name }}"
-          COMMIT_SHA="${{ github.sha }}"
-          COMMIT_DATE="${{ github.event.head_commit.timestamp }}"
-
-          echo "message<<EOF" >> $GITHUB_OUTPUT
-          echo "$COMMIT_MESSAGE" >> $GITHUB_OUTPUT
-          echo "EOF" >> $GITHUB_OUTPUT
-
-          echo "author=$COMMIT_AUTHOR" >> $GITHUB_OUTPUT
-          echo "sha=$COMMIT_SHA" >> $GITHUB_OUTPUT
-          echo "date=$COMMIT_DATE" >> $GITHUB_OUTPUT
-
-      - name: Check for existing PR
-        id: check-pr
+      - name: Get commit info and check PR
+        id: setup
         uses: actions/github-script@v7
         with:
           script: |
+            // Sanitize and validate inputs to prevent injection
+            const sanitizeInput = (input) => {
+              if (typeof input !== 'string') return '';
+              // Remove potentially dangerous characters, keep only safe ones
+              return input.replace(/[`$\\]/g, '').substring(0, 500);
+            };
+
+            // Get commit info from context (trusted source)
+            const commitMessage = sanitizeInput(context.payload.head_commit?.message || '');
+            const commitAuthor = sanitizeInput(context.payload.head_commit?.author?.name || '');
+            const commitSha = context.sha; // Already validated by GitHub
+            const commitDate = context.payload.head_commit?.timestamp || '';
+
+            // Validate required fields
+            if (!commitMessage || !commitAuthor || !commitSha) {
+              core.setFailed('Missing required commit information');
+              return;
+            }
+
+            // Check for existing PR with exact branch names (no user input)
             const { data: prs } = await github.rest.pulls.list({
               owner: context.repo.owner,
               repo: context.repo.repo,
@@ -58,41 +65,57 @@ jobs:
 
             const existingPR = prs.length > 0 ? prs[0] : null;
 
-            if (existingPR) {
-              core.setOutput('pr-exists', 'true');
-              core.setOutput('pr-number', existingPR.number);
-              core.setOutput('pr-body', existingPR.body || '');
-              console.log(`Found existing PR #${existingPR.number}`);
-            } else {
-              core.setOutput('pr-exists', 'false');
-              console.log('No existing PR found');
-            }
+            // Set sanitized outputs
+            core.setOutput('commit-message', commitMessage);
+            core.setOutput('commit-author', commitAuthor);
+            core.setOutput('commit-sha', commitSha);
+            core.setOutput('commit-date', commitDate);
+            core.setOutput('pr-exists', existingPR ? 'true' : 'false');
+            core.setOutput('pr-number', existingPR ? String(existingPR.number) : '');
+            core.setOutput('pr-body', existingPR ? sanitizeInput(existingPR.body || '') : '');
+
+            console.log(existingPR ? `Found existing PR #${existingPR.number}` : 'No existing PR found');
 
       - name: Create or update branch
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # Check if branch exists remotely
-          if git ls-remote --heads origin feat/latest-changes-from-main | grep -q feat/latest-changes-from-main; then
-            echo "Branch exists, checking it out and updating..."
-            git fetch origin feat/latest-changes-from-main
-            git checkout feat/latest-changes-from-main
+          set -euo pipefail  # Exit on error, undefined vars, pipe failures
+
+          # Fixed branch names (no user input)
+          FEATURE_BRANCH="feat/latest-changes-from-main"
+
+          # Check if branch exists remotely (quoted to prevent splitting)
+          if git ls-remote --heads origin "${FEATURE_BRANCH}" | grep -q "${FEATURE_BRANCH}"; then
+            echo "Branch exists, updating..."
+            git fetch origin "${FEATURE_BRANCH}"
+            git checkout "${FEATURE_BRANCH}"
             git reset --hard origin/main
           else
-            echo "Branch doesn't exist, creating from main..."
-            git checkout -b feat/latest-changes-from-main
+            echo "Creating new branch..."
+            git checkout -b "${FEATURE_BRANCH}"
           fi
 
-          git push origin feat/latest-changes-from-main
+          git push origin "${FEATURE_BRANCH}"
 
       - name: Create new PR
-        if: steps.check-pr.outputs.pr-exists == 'false'
+        if: steps.setup.outputs.pr-exists == 'false'
         uses: actions/github-script@v7
         with:
           script: |
-            const commitMessage = `${{ steps.commit-info.outputs.message }}`;
-            const commitAuthor = `${{ steps.commit-info.outputs.author }}`;
-            const commitSha = context.sha;
-            const commitDate = `${{ steps.commit-info.outputs.date }}`;
+            // All inputs are from previous step outputs (sanitized) or GitHub context (trusted)
+            const commitMessage = `${{ steps.setup.outputs.commit-message }}`;
+            const commitAuthor = `${{ steps.setup.outputs.commit-author }}`;
+            const commitSha = `${{ steps.setup.outputs.commit-sha }}`;
+            const commitDate = `${{ steps.setup.outputs.commit-date }}`;
 
+            // Validate inputs again before use
+            if (!commitMessage || !commitAuthor || !commitSha) {
+              core.setFailed('Invalid commit information for PR creation');
+              return;
+            }
+
+            // Template with escaped content
             const body = `## 🔄 Latest Changes from Main
 
             This PR contains the latest changes from the \`main\` branch that need to be integrated into \`feat/PEP-2386-dsp-v1-integration\`.
@@ -113,79 +136,79 @@ jobs:
             _Auto-created by @${context.actor}_
             `;
 
-            const { data: pr } = await github.rest.pulls.create({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              title: '🔄 Sync latest changes from main',
-              head: 'feat/latest-changes-from-main',
-              base: 'feat/PEP-2386-dsp-v1-integration',
-              body: body,
-              draft: false
-            });
-
-            console.log(`Created PR #${pr.number}`);
-
-            // Add labels if they exist
             try {
-              await github.rest.issues.addLabels({
+              const { data: pr } = await github.rest.pulls.create({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
-                issue_number: pr.number,
-                labels: ['auto-sync', 'main-integration']
+                title: '🔄 Sync latest changes from main',
+                head: 'feat/latest-changes-from-main', // Fixed string, no injection risk
+                base: 'feat/PEP-2386-dsp-v1-integration', // Fixed string, no injection risk
+                body: body
               });
+
+              console.log(`Created PR #${pr.number}`);
+
             } catch (error) {
-              console.log('Note: Could not add labels (they may not exist in the repo)');
+              core.setFailed(`Failed to create PR: ${error.message}`);
             }
 
       - name: Update existing PR
-        if: steps.check-pr.outputs.pr-exists == 'true'
+        if: steps.setup.outputs.pr-exists == 'true'
         uses: actions/github-script@v7
         with:
           script: |
-            const commitMessage = `${{ steps.commit-info.outputs.message }}`;
-            const commitAuthor = `${{ steps.commit-info.outputs.author }}`;
-            const commitSha = context.sha;
-            const commitDate = `${{ steps.commit-info.outputs.date }}`;
-            const prNumber = ${{ steps.check-pr.outputs.pr-number }};
-            const existingBody = `${{ steps.check-pr.outputs.pr-body }}`;
+            // All inputs are sanitized from previous steps
+            const commitMessage = `${{ steps.setup.outputs.commit-message }}`;
+            const commitAuthor = `${{ steps.setup.outputs.commit-author }}`;
+            const commitSha = `${{ steps.setup.outputs.commit-sha }}`;
+            const commitDate = `${{ steps.setup.outputs.commit-date }}`;
+            const prNumber = parseInt(`${{ steps.setup.outputs.pr-number }}`, 10);
+            const existingBody = `${{ steps.setup.outputs.pr-body }}`;
+
+            // Validate inputs
+            if (!commitMessage || !commitAuthor || !commitSha || !prNumber) {
+              core.setFailed('Invalid data for PR update');
+              return;
+            }
 
             const newCommitEntry = `**${new Date(commitDate).toLocaleString()}** - ${commitMessage}
             _by ${commitAuthor}_ (\`${commitSha.substring(0, 7)}\`)
             `;
 
-            // Find where to insert the new commit (after "### Recent Commits:" line)
-            const lines = existingBody.split('\n');
-            const commitsIndex = lines.findIndex(line => line.includes('### Recent Commits:'));
+            try {
+              // Update PR body
+              const lines = existingBody.split('\n');
+              const commitsIndex = lines.findIndex(line => line.includes('### Recent Commits:'));
 
-            if (commitsIndex !== -1) {
-              // Insert the new commit after the "### Recent Commits:" line and empty line
-              lines.splice(commitsIndex + 2, 0, newCommitEntry);
-              const updatedBody = lines.join('\n');
+              if (commitsIndex !== -1) {
+                lines.splice(commitsIndex + 2, 0, newCommitEntry);
+                const updatedBody = lines.join('\n');
 
-              await github.rest.pulls.update({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                pull_number: prNumber,
-                body: updatedBody
-              });
+                await github.rest.pulls.update({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  pull_number: prNumber,
+                  body: updatedBody
+                });
 
-              console.log(`Updated PR #${prNumber} with new commit`);
+                await github.rest.issues.createComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: prNumber,
+                  body: `🔄 **New commit added from main by @${context.actor}:**\n\n${newCommitEntry}`
+                });
 
-              // Add a comment about the new commit
-              await github.rest.issues.createComment({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                issue_number: prNumber,
-                body: `🔄 **New commit added from main by @${context.actor}:**\n\n${newCommitEntry}`
-              });
+                console.log(`Updated PR #${prNumber}`);
+              }
+
+            } catch (error) {
+              core.setFailed(`Failed to update PR: ${error.message}`);
             }
 
-      - name: Summary
-        uses: actions/github-script@v7
-        with:
-          script: |
-            if ('${{ steps.check-pr.outputs.pr-exists }}' === 'true') {
-              console.log(`✅ Updated existing PR #${{ steps.check-pr.outputs.pr-number }} with new changes from main`);
-            } else {
-              console.log(`✅ Created new PR to sync changes from main to feat/PEP-2386-dsp-v1-integration`);
-            }
+      - name: Cleanup credentials
+        if: always()
+        run: |
+          # Remove git configuration to ensure credentials don't persist
+          git config --local --unset url."https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/".insteadOf || true
+          git config --local --unset user.name || true
+          git config --local --unset user.email || true
