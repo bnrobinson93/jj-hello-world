@@ -94,8 +94,7 @@ jobs:
               --title "$PR_TITLE" \
               --body "$PR_BODY" \
               --base "$TARGET_BRANCH" \
-              --head "main" \
-              --assignee "@me")
+              --head "main")
             
             echo "Created new PR: $pr_number"
           fi
