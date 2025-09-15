@@ -6,6 +6,8 @@ on:
       - main
 
 env:
+  USERNAME: "bnrobinson93"
+  EMAIL: "31802085+bnrobinson93@users.noreply.github.com"
   TARGET_BRANCH: "feat/PEP-2386-dsp-v1-integration"
   PR_TITLE: "Sync main branch changes"
   PR_BODY: |
@@ -29,8 +31,8 @@ jobs:
 
       - name: Configure Git
         run: |
-          git config --global user.name "github-actions[bot]"
-          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git config --global user.name "$USERNAME"
+          git config --global user.email "$EMAIL"
 
       - name: Check for existing PR
         id: check-pr
